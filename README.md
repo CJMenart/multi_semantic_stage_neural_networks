@@ -7,8 +7,12 @@ This contains (or at one point in time contained :P) neural architecture code ad
 -Renê Ranftl and Alexey Bochkovskiy, "Vision Transformers for Dense Prediction", ArXiv / Renê Ranftl et al., "Towards Robust Monocular Depth Estimation: Mixing Datasets for Zero-shot Cross-dataset Transfer", TPAMI 2020
 -Ze Liu et al, "Swin Transformer: Hierarchical Vision Transformer Using Shifted Windows", ICCV 2021
 -Nakano et al, "Cross-Task Consistency Learning Framework for Multi-Task Learning", CVPR 2020
+-"Anchors: High-Precision Model-Agnostic Explanations" by Riberio et al., AAAI 2018
 -And of course a copy of ResNet from the PyTorch model zoo.
 
-To replicate the results from the first paper, use ade_experiments.py, and run experiments over five trials (using the random seeds 1-5 for the partial supervision experiments).
-The first-experiment code has been updated to use the new core interface and hasn't been tested since then, so full warning, it's not the *exact* same code.
+To replicate the results from the paper, use ade_experiments.py, and run experiments over five trials (using the random seeds 1-5 for the partial supervision experiments).
+
+============================================================
+
+This branch is newer than "performance_experiments", and, at time of writing this comment near the end of 2022, is the most up-to-date branch publicly released. It contains a number of small but backwards-compatibility-breaking changes from performance_experiments. This branch was used for the explainability-specific experiments in the second half of our paper.
 
