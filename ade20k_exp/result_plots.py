@@ -36,8 +36,6 @@ def plot_partially_sup_results(csv_path,y='Accuracy'):
     """
     df = pandas.read_csv(csv_path)
     seaborn.set_theme()
-    #define figure size
-    seaborn.set(rc={"figure.figsize":(7.5, 5)}) #width=8, height=4
     plot = seaborn.barplot(x="Model Type",y=y,data=df)
     # plt.legend?
     plt.title("Partially Supervised NGM")

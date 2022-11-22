@@ -1,0 +1,6 @@
+events.out.tfevents.*
+*.png
+*.csv
+*.pyc
+*.pth
+**/*.pyc

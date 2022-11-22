@@ -1,12 +1,9 @@
 """
 Experiments running NGMs on the 16 most common scenes of the MIT ADE20K dataset.
 Main experiments of the paper.
-
 For directory structure of data see ade20k_common_scenes_dataset.py
-
 """
-from random_variable import CategoricalVariable, MultiplyPredictedCategoricalVariable, MultiplyPredictedBooleanVariable, GaussianVariable, DeterministicLatentVariable
-from advanced_random_variables import ProbSpaceBooleanVariable
+from random_variable import CategoricalVariable, BooleanVariable, GaussianVariable, DeterministicContinuousVariable
 from graphical_model import NeuralGraphicalModel
 import torch
 import numpy as np
@@ -35,7 +32,6 @@ import timeit
 
 SHARED_FEATURE_DIM = 128
 NUM_WORKER = 16
-# DIVIE BY 8 IS DEBUG
 DEF_BATCH_SIZE = 64
 IMAGE_INPUT_SZ = 512
 OBJ_SEG_SZ = 32
@@ -73,7 +69,6 @@ class PartialSupervisionSampler(Sampler):
         
     def _build_batches(self):
         logger.debug("Building legal batches...")
-        #logger.debug(f"sampler.supervision_groups: {self.supervision_groups}")
         self.batches = []
 
         for suptype in range(len(self.supervision_groups)):
@@ -82,7 +77,7 @@ class PartialSupervisionSampler(Sampler):
             while len(indices) > 0:
                 self.batches.append([indices.pop() for i in range(min(self.batch_size, len(indices)))])
         random.shuffle(self.batches)
-        
+                
 
 class SynsetFromADEPredictor(torch.nn.Module):
     
@@ -94,7 +89,7 @@ class SynsetFromADEPredictor(torch.nn.Module):
         self.register_buffer('ZERO', torch.tensor([0.0], dtype=torch.float32, requires_grad=False), persistent=False)
         
     def forward(self, ade_objects, *child_synsets):
-                    
+            
         if len(child_synsets) > 0:
             child_synsets_stacked = torch.stack(child_synsets, dim=1)
             all_p_concat = torch.cat([child_synsets_stacked, ade_objects.index_select(dim=1, index=self.ade_children_mapped)], dim=1)
@@ -110,18 +105,18 @@ class SynsetFromADEPredictor(torch.nn.Module):
 
 class SynsetFromFeaturePredictor(torch.nn.Module):
 
-    def __init__(self):
+    def __init__(self, dim=SHARED_FEATURE_DIM):
         super(SynsetFromFeaturePredictor, self).__init__()
-        self.conv = torch.nn.Conv2d(SHARED_FEATURE_DIM, 1, kernel_size=1, bias=True)
+        self.conv = torch.nn.Conv2d(dim, 1, kernel_size=1, bias=True)
         self.register_buffer('SYNSET_LOGIT_RANGE', torch.tensor([SYNSET_LOGIT_RANGE], dtype=torch.float32, requires_grad=False), persistent=False)
         
     def forward(self, shared_features):
         # reason for extra tanh
         # with just two "answers", it's too easy to saturate out the machine precision and get infinite loss    
         logits = torch.tanh(torch.squeeze(self.conv(shared_features), dim=1)/self.SYNSET_LOGIT_RANGE)*self.SYNSET_LOGIT_RANGE
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"SynsetFromFeaturePredictor.SYNSET_LOGIT_RANGE : {self.SYNSET_LOGIT_RANGE}")
-            logger.debug(f"SynsetFromFeaturePredictor logits.max(): {logits.max()}")
+        #if logger.isEnabledFor(logging.DEBUG):
+        #    logger.debug(f"SynsetFromFeaturePredictor.SYNSET_LOGIT_RANGE : {self.SYNSET_LOGIT_RANGE}")
+        #    logger.debug(f"SynsetFromFeaturePredictor logits.max(): {logits.max()}")
         return logits
         
 
@@ -161,12 +156,12 @@ def model_A(hierarchy, layer_sizes=[3, 4, 6, 3], block=BasicBlock, SGD_rather_th
     objects_to_imclass = ObjectsToImClass(n_ade_objects + n_synsets)
 
     graph = NeuralGraphicalModel(SGD_rather_than_EM=SGD_rather_than_EM)
-    graph.addvar(GaussianVariable(name='Image', predictor_fn=None))  # always observed
-    graph.addvar(DeterministicLatentVariable(name='SharedFeatures', predictor_fn=shared_feature_pred, parents=[graph['Image']]))
-    graph.addvar(DeterministicLatentVariable(name='SynsetFeatures', predictor_fn=synset_feature_pred, parents=[graph['SharedFeatures']]))
+    graph.addvar(GaussianVariable(name='Image', per_prediction_parents=[], predictor_fns=[]))  # always observed
+    graph.addvar(DeterministicContinuousVariable(name='SharedFeatures', predictor_fns=[shared_feature_pred], per_prediction_parents=[[graph['Image']]]))
+    graph.addvar(DeterministicContinuousVariable(name='SynsetFeatures', predictor_fns=[synset_feature_pred], per_prediction_parents=[[graph['SharedFeatures']]]))
     
     # the objects 
-    graph.addvar(CategoricalVariable(n_ade_objects, name='ADEObjects', gradient_estimator=gradient_estimator, predictor_fn=ade_obj_pred, parents=[graph['SharedFeatures']]))
+    graph.addvar(CategoricalVariable(num_categories=n_ade_objects, name='ADEObjects', gradient_estimator=gradient_estimator, predictor_fns=[ade_obj_pred], per_prediction_parents=[[graph['SharedFeatures']]]))
     synset_vars = []
     synset_idx_to_do = list(hierarchy.valid_indices()[1])
     while len(synset_idx_to_do) > 0:
@@ -175,14 +170,14 @@ def model_A(hierarchy, layer_sizes=[3, 4, 6, 3], block=BasicBlock, SGD_rather_th
                 predictor_fn = SynsetFromADEPredictor(hierarchy.valid_ade_children_mapped(synset_idx))
                 synset_subclasses = [graph[hierarchy.ind2synset[idx]] for idx in hierarchy.valid_children_of(synset_idx) if idx in hierarchy.valid_indices()[1]]
                 logger.debug(f"synset_subclasses of {hierarchy.ind2synset[synset_idx]}: {synset_subclasses}")
-                synset_var = MultiplyPredictedBooleanVariable(name=hierarchy.ind2synset[synset_idx], gradient_estimator=gradient_estimator,\
+                synset_var = BooleanVariable(name=hierarchy.ind2synset[synset_idx], gradient_estimator=gradient_estimator,\
                                 predictor_fns=[predictor_fn, SynsetFromFeaturePredictor()], \
                                 per_prediction_parents=[[graph['ADEObjects'], *synset_subclasses], [graph['SynsetFeatures']]])
                 synset_vars.append(synset_var)
                 graph.addvar(synset_var)
                 synset_idx_to_do.remove(synset_idx)
     
-    graph.addvar(MultiplyPredictedCategoricalVariable(len(IMCLASSES), name='ImageClass', predictor_fns=[direct_class_pred, objects_to_imclass], \
+    graph.addvar(CategoricalVariable(num_categories=len(IMCLASSES), name='ImageClass', predictor_fns=[direct_class_pred, objects_to_imclass], \
                                                 per_prediction_parents=[[graph['SharedFeatures']], [graph['ADEObjects'], *synset_vars]]))
     
     return graph 
@@ -198,11 +193,11 @@ def multitask_learning_model(hierarchy):
     ade_obj_pred = ResNet(layers=[3, 4, 6, 3], block=BasicBlock, num_classes=n_ade_objects, active_stages=[3], input_dim=SHARED_FEATURE_DIM)
 
     graph = NeuralGraphicalModel()
-    graph.addvar(GaussianVariable(name='Image', predictor_fn=None))  # always observed
-    graph.addvar(DeterministicLatentVariable(name='SharedFeatures', predictor_fn=shared_feature_pred, parents=[graph['Image']]))
+    graph.addvar(GaussianVariable(name='Image', predictor_fns=[]))  # always observed
+    graph.addvar(DeterministicContinuousVariable(name='SharedFeatures', predictor_fns=[shared_feature_pred], per_prediction_parents=[[graph['Image']]]))
     # the objects 
-    graph.addvar(CategoricalVariable(n_ade_objects, name='ADEObjects', predictor_fn=ade_obj_pred, parents=[graph['SharedFeatures']]))    
-    graph.addvar(CategoricalVariable(len(IMCLASSES), name='ImageClass', predictor_fn=direct_class_pred, parents=[graph['SharedFeatures']]))
+    graph.addvar(CategoricalVariable(num_categories=n_ade_objects, name='ADEObjects', predictor_fns=[ade_obj_pred], per_prediction_parents=[[graph['SharedFeatures']]]))
+    graph.addvar(CategoricalVariable(num_categories=len(IMCLASSES), name='ImageClass', predictor_fns=[direct_class_pred], per_prediction_parents=[[graph['SharedFeatures']]]))
     return graph
 
 
@@ -221,20 +216,24 @@ def ablation_model(hierarchy, layer_sizes=[3, 4, 6, 3], block=BasicBlock, SGD_ra
     objects_to_imclass = ObjectsToImClass(n_ade_objects)
 
     graph = NeuralGraphicalModel(SGD_rather_than_EM=SGD_rather_than_EM)
-    graph.addvar(GaussianVariable(name='Image', predictor_fn=None))  # always observed
-    graph.addvar(DeterministicLatentVariable(name='SharedFeatures', predictor_fn=shared_feature_pred, parents=[graph['Image']]))
+    graph.addvar(GaussianVariable(name='Image', predictor_fns=[]))  # always observed
+    graph.addvar(DeterministicContinuousVariable(name='SharedFeatures', predictor_fns=[shared_feature_pred], per_prediction_parents=[[graph['Image']]]))
     
     # the objects 
-    graph.addvar(CategoricalVariable(n_ade_objects, name='ADEObjects', gradient_estimator=gradient_estimator, predictor_fn=ade_obj_pred, parents=[graph['SharedFeatures']]))
-    graph.addvar(MultiplyPredictedCategoricalVariable(len(IMCLASSES), name='ImageClass', predictor_fns=[direct_class_pred, objects_to_imclass], \
+    graph.addvar(CategoricalVariable(num_categories=n_ade_objects, name='ADEObjects', gradient_estimator=gradient_estimator, predictor_fns=[ade_obj_pred], per_prediction_parents=[[graph['SharedFeatures']]]))
+    graph.addvar(CategoricalVariable(num_categories=len(IMCLASSES), name='ImageClass', predictor_fns=[direct_class_pred, objects_to_imclass], \
                                                 per_prediction_parents=[[graph['SharedFeatures']], [graph['ADEObjects']]]))
     
     return graph 
 
 
-def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHierarchy, train_loader, name='ADE_NGM', BATCH_SIZE=DEF_BATCH_SIZE, LR=DEF_LR, PATIENCE=DEF_PATIENCE, TRAIN_SAMPLES = SAMPLES_PER_PASS, linear_unsup_weight_schedule=True, skip_unsupervised=False, synsets=True):
+def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHierarchy, train_loader, name='ADE_NGM', BATCH_SIZE=DEF_BATCH_SIZE, LR=DEF_LR, PATIENCE=DEF_PATIENCE, TRAIN_SAMPLES = SAMPLES_PER_PASS, linear_unsup_weight_schedule=False, skip_unsupervised=False, synsets=True, pool_arrays=False, val_set=None, test_set=None, resume=False):
     
+    assert not linear_unsup_weight_schedule, "This loss weighting no longer supported. Check out an older branch to run this."
+
     WEIGHT_DECAY = LR / 5
+    weights_savename = f"ade_graph_{name}.pth"
+    trainstat_savename = f"ade_trainingdata_{name}.pth"
     
     # training objects
     logger.debug(f"graph.paraneters(): {list(graph.parameters())}")
@@ -245,8 +244,10 @@ def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHiera
     scaler = GradScaler()
     
     # dataset
-    val_set = ADE20KCommonScenesDataset(datapath, IMAGE_INPUT_SZ, OBJ_SEG_SZ, "val", hierarchy, synsets=synsets)
-    test_set = ADE20KCommonScenesDataset(datapath, IMAGE_INPUT_SZ, OBJ_SEG_SZ, "test", hierarchy, synsets=synsets)
+    if val_set is None:
+        val_set = ADE20KCommonScenesDataset(datapath, IMAGE_INPUT_SZ, OBJ_SEG_SZ, "val", hierarchy, synsets=synsets, pool_arrays=pool_arrays)
+    if test_set is None:
+        test_set = ADE20KCommonScenesDataset(datapath, IMAGE_INPUT_SZ, OBJ_SEG_SZ, "test", hierarchy, synsets=synsets, pool_arrays=pool_arrays)
     
     stopping_set = torch.utils.data.Subset(val_set, list(range(0, len(val_set), 2)))
     calibration_set = torch.utils.data.Subset(val_set, list(range(1, len(val_set), 2)))
@@ -255,16 +256,28 @@ def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHiera
     calibration_loader = torch.utils.data.DataLoader(calibration_set, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKER)
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=1, shuffle=False, num_workers=NUM_WORKER)
 
+    # resume training if necessary
+    if resume:
+        training_stats = torch.load(trainstat_savename)
+        start_epoch = training_stats['epoch']
+        best_holdout_loss = training_stats['best_holdout_loss']
+        epochs_without_improvement = training_stats['epochs_without_improvement']
+        optimizer.load_state_dict(training_stats['optimizer_state_dict'])    
+        graph.load_state_dict(torch.load(weights_savename))
+        logger.info(f"Resuming from epoch {start_epoch}")
+    else:
+        epochs_without_improvement = 0
+        best_holdout_loss = float('inf')
+        start_epoch = 0
+
     # training    
-    iter = 0
-    epochs_without_improvement = 0
-    best_holdout_loss = float('inf')
+    iter = start_epoch*len(train_loader)
         
     # Time training
     start_sec = timeit.default_timer()
 
     logger.info("Time to start training!")
-    for epoch in range(MAX_TRAIN_EPOCH):
+    for epoch in range(start_epoch, MAX_TRAIN_EPOCH):
         graph.train()
         first_iter_in_epoch = True
         for data in train_loader:
@@ -272,21 +285,17 @@ def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHiera
             if skip_unsupervised and 'ADEObjects' not in data and 'ImageClass' not in data:
                 continue
 
-            if linear_unsup_weight_schedule:
-                unsuper_weight = min(1.0, iter / UNSUPERVISED_DOWNWEIGHT_SCHEDULE)
-            else:
-                unsuper_weight = 0.0 if iter < UNSUPERVISED_DOWNWEIGHT_SCHEDULE else 1.0
-            unsupervised_loss_weight = torch.tensor(unsuper_weight, dtype=torch.float32).cuda()
-
             optimizer.zero_grad()
             
             with autocast():
                 data = dict_to_gpu(data)
-                loss = graph.loss(data, unsupervised_loss_weight=unsupervised_loss_weight, \
+                loss = graph.loss(data, keep_unsupervised_loss=not linear_unsup_weight_schedule and iter < UNSUPERVISED_DOWNWEIGHT_SCHEDULE, \
                     samples_in_pass=TRAIN_SAMPLES, summary_writer=summary_writer if first_iter_in_epoch else None, global_step=iter)
             if first_iter_in_epoch:
                 summary_writer.add_scalar('trainloss', loss, iter)
                 logger.debug(f"trainloss: {loss}")
+                logger.debug(f"data: {data}")
+                logger.debug(f"Scaler: {scaler.state_dict()}")
                 first_iter_in_epoch = False
 
             scaler.scale(loss).backward()
@@ -294,8 +303,6 @@ def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHiera
             scaler.update()
             iter += 1
 
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"Scaler: {scaler.state_dict()}")
             loss = None
 
         if epoch % EPOCH_PER_CHECK == 0:
@@ -307,10 +314,11 @@ def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHiera
             for cal_epoch in range(CALIBRATE_EPOCH):
                 first_iter_in_epoch = True
                 for data in calibration_loader:
+
                     calibration_optimizer.zero_grad()
                     with autocast():
                         data = dict_to_gpu(data)
-                        loss = graph.loss(data, samples_in_pass=TRAIN_SAMPLES, force_predicted_input=[graph['ADEObjects']], \
+                        loss = graph.loss(data, samples_in_pass=TRAIN_SAMPLES, force_predicted_input=[rvar for rvar in graph if rvar.name != 'Image'], \
                                     summary_writer=summary_writer if first_iter_in_epoch else None, global_step=iter)
                     first_iter_in_epoch = False
                     iter += 1
@@ -319,8 +327,6 @@ def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHiera
                     scaler.step(calibration_optimizer)
                     scaler.update()                
                     
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(f"Scaler: {scaler.state_dict()}")
                     loss = None
             calibration_optimizer.zero_grad(True)            
         
@@ -340,10 +346,12 @@ def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHiera
                     logger.info(f"Stopping early at epoch {epoch}")
                     break
 
-            torch.save(graph.state_dict(), f"ade_graph_{name}.pth")            
+            torch.save(graph.state_dict(), weights_savename)   
+            torch.save({'epoch': epoch, 'best_holdout_loss': best_holdout_loss, 'optimizer_state_dict': optimizer.state_dict(), \
+                'epochs_without_improvement': epochs_without_improvement}, trainstat_savename)
             loss = None
-            torch.cuda.empty_cache() # Fights GPU memory fragmentation 
-        logger.info(f"Epoch {epoch} complete.")
+        torch.cuda.empty_cache() # Fights GPU memory fragmentation 
+        logger.info(f"Epoch {epoch} complete. {epochs_without_improvement} epochs without improvement.")
         
     logger.info(f"Training stopped after {iter} iterations.")
 
@@ -360,7 +368,7 @@ def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHiera
             data = dict_to_gpu(data)
             calibration_optimizer.zero_grad()
             with autocast():
-                loss = graph.loss(data, samples_in_pass=TRAIN_SAMPLES, force_predicted_input=[graph['ADEObjects']],\
+                loss = graph.loss(data, samples_in_pass=TRAIN_SAMPLES, force_predicted_input=[rvar for rvar in graph if rvar.name != 'Image'],\
                             summary_writer=summary_writer if first_iter_in_epoch else None, global_step=iter)
             first_iter_in_epoch = False
   
@@ -396,32 +404,14 @@ def main(datapath: Path, graph: NeuralGraphicalModel, hierarchy: ADEWordnetHiera
     logger.info(f"Done with experiment {name}")
     
 
-def evaluate_given_image(graph: NeuralGraphicalModel, test_set, calibration_set, name: str):
+def evaluate_given_image(graph: NeuralGraphicalModel, test_set, name: str):
     """
     Load a trained network and do the same evaluation as in main()
     """
     graph.load_state_dict(torch.load(f"ade_graph_{name}.pth"))
-    TRAIN_SAMPLES = SAMPLES_PER_PASS 
-    scaler = GradScaler()
-
-    calibration_loader = torch.utils.data.DataLoader(calibration_set, batch_size=DEF_BATCH_SIZE, shuffle=True, num_workers=NUM_WORKER)
-    calibration_optimizer = torch.optim.Adam(graph.calibration_parameters(), lr=DEF_LR, weight_decay=0, eps=ADAM_EPS)
-    graph.reset_calibration()
-    graph.validate()
-    for epoch in range(CALIBRATE_EPOCH):
-        for data in calibration_loader:
-            data = dict_to_gpu(data)
-            calibration_optimizer.zero_grad()
-            with autocast():
-                loss = graph.loss(data, samples_in_pass=TRAIN_SAMPLES, force_predicted_input=[rvar for rvar in graph.random_variables if rvar.name != 'Image'],\
-                            summary_writer=None, global_step=iter)
-  
-            scaler.scale(loss).backward()
-            scaler.step(calibration_optimizer)
-            scaler.update()
-
-    # evaluation
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=1, shuffle=False, num_workers=NUM_WORKER)
+            
+    # evaluation
     graph.eval()
     confusion = np.zeros((len(IMCLASSES), len(IMCLASSES)), dtype=np.int32)
     with torch.no_grad():
@@ -440,40 +430,16 @@ def evaluate_given_image(graph: NeuralGraphicalModel, test_set, calibration_set,
     logger.info(f"Done with evaluation of {name} given image.")
     
     
-def evaluate_given_ade_objects(graph: NeuralGraphicalModel, test_set, calibration_set, name: str):
+def evaluate_given_ade_objects(graph: NeuralGraphicalModel, test_set, name: str):
     """
     Load a trained network and evaluate it--but give it access not just to the image, but tell it what ADE20K objects are present 
     in each scene. Given this information, when available, an NGM can make a more accurate prediction.
     """
     graph.load_state_dict(torch.load(f"ade_graph_{name}.pth"))
-    TRAIN_SAMPLES = SAMPLES_PER_PASS 
-    scaler = GradScaler()
-                
-    # Calibration
-    calibration_loader = torch.utils.data.DataLoader(calibration_set, batch_size=DEF_BATCH_SIZE, shuffle=True, num_workers=NUM_WORKER)
-    calibration_optimizer = torch.optim.Adam(graph.calibration_parameters(), lr=DEF_LR, weight_decay=0, eps=ADAM_EPS)
-    
-    graph.reset_calibration()
-    graph.validate()
-    for epoch in range(CALIBRATE_EPOCH):
-        first_iter_in_epoch = True
-        for data in calibration_loader:
-            data = dict_to_gpu(data)
-            calibration_optimizer.zero_grad()
-            with autocast():
-                loss = graph.loss(data, samples_in_pass=TRAIN_SAMPLES, force_predicted_input=[rvar for rvar in graph.random_variables if '.n' in rvar.name],\
-                            summary_writer=None, global_step=iter)
-            first_iter_in_epoch = False
-  
-            scaler.scale(loss).backward()
-            scaler.step(calibration_optimizer)
-            scaler.update()
-
-            loss = None
-    
-    # evaluation
+            
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=1, shuffle=False, num_workers=NUM_WORKER)
-    
+            
+    # evaluation
     graph.eval()
     confusion = np.zeros((len(IMCLASSES), len(IMCLASSES)), dtype=np.int32)
     with torch.no_grad():
@@ -492,50 +458,25 @@ def evaluate_given_ade_objects(graph: NeuralGraphicalModel, test_set, calibratio
     logger.info(f"Done with evaluation of {name} given image and ade objects")
     
 
-def evaluate_given_all_objects(graph: NeuralGraphicalModel, test_set, calibration_set, name: str):
+def evaluate_given_all_objects(graph: NeuralGraphicalModel, hierarchy: ADEWordnetHierarchy, test_set, name: str):
     """
     Same as above, but tell the model about both ADE20K objects and Wordnet synset objects.
     """
     graph.load_state_dict(torch.load(f"ade_graph_{name}.pth"))
-    TRAIN_SAMPLES = SAMPLES_PER_PASS 
-    scaler = GradScaler()
             
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=1, shuffle=False, num_workers=NUM_WORKER)
-    
-    # Calibration
-    calibration_loader = torch.utils.data.DataLoader(calibration_set, batch_size=DEF_BATCH_SIZE, shuffle=True, num_workers=NUM_WORKER)
-    calibration_optimizer = torch.optim.Adam(graph.calibration_parameters(), lr=DEF_LR, weight_decay=0, eps=ADAM_EPS)
-    
-    graph.reset_calibration()
-    graph.validate()
-    for epoch in range(CALIBRATE_EPOCH):
-        first_iter_in_epoch = True
-        for data in calibration_loader:
-            data = dict_to_gpu(data)
-            calibration_optimizer.zero_grad()
-            with autocast():
-                loss = graph.loss(data, samples_in_pass=TRAIN_SAMPLES, force_predicted_input=[],\
-                            summary_writer=None, global_step=iter)
-            first_iter_in_epoch = False
-  
-            scaler.scale(loss).backward()
-            scaler.step(calibration_optimizer)
-            scaler.update()
-
-            loss = None
-
+            
     # evaluation
     graph.eval()
     confusion = np.zeros((len(IMCLASSES), len(IMCLASSES)), dtype=np.int32)
     with torch.no_grad():
         for data in test_loader:
             observations = data
-            gt = observations['ImageClass']
             del observations['ImageClass']
             observations = dict_to_gpu(observations)
             with autocast():
                 marginals = graph.predict_marginals(observations, to_predict_marginal=['ImageClass'], samples_per_pass=DEF_BATCH_SIZE//2, num_passes=2)
-                confusion[gt, torch.argmax(torch.squeeze(marginals[graph['ImageClass']].probs))] += 1
+                confusion[data['ImageClass'], torch.argmax(torch.squeeze(marginals[graph['ImageClass']].probs))] += 1
 
     logger.info(f"Confusion Matrix: {confusion}")
     logger.info(f"Accuracy: {np.sum(np.diag(confusion))/np.sum(confusion)}")
@@ -746,9 +687,7 @@ def experiment_A_given_objects(datapath: Path, csv_file: Path, index_file: Path,
     hierarchy = ADEWordnetHierarchy(csv_file, datapath, index_file)
     graph = model_A(hierarchy).cuda()
     test_set = ADE20KCommonScenesDataset(datapath, IMAGE_INPUT_SZ, OBJ_SEG_SZ, "test", hierarchy)
-    val_set = ADE20KCommonScenesDataset(datapath, IMAGE_INPUT_SZ, OBJ_SEG_SZ, "val", hierarchy, synsets=False)
-    calibration_set = torch.utils.data.Subset(val_set, list(range(1, len(val_set), 2)))
-    evaluate_given_ade_objects(graph, test_set, calibraiton_set, name)
+    evaluate_given_ade_objects(graph, test_set, name)
 
 
 def experiment_A_given_objects_and_synsets(datapath: Path, csv_file: Path, index_file: Path, name: str):
@@ -759,9 +698,7 @@ def experiment_A_given_objects_and_synsets(datapath: Path, csv_file: Path, index
     hierarchy = ADEWordnetHierarchy(csv_file, datapath, index_file)
     graph = model_A(hierarchy).cuda()
     test_set = ADE20KCommonScenesDataset(datapath, IMAGE_INPUT_SZ, OBJ_SEG_SZ, "test", hierarchy)
-    val_set = ADE20KCommonScenesDataset(datapath, IMAGE_INPUT_SZ, OBJ_SEG_SZ, "val", hierarchy, synsets=True)
-    calibration_set = torch.utils.data.Subset(val_set, list(range(1, len(val_set), 2)))
-    evaluate_given_all_objects(graph, test_set, calibration_set, name)
+    evaluate_given_all_objects(graph, hierarchy, test_set, name)
     
     
 def partial_sup_exp(datapath: Path, csv_file: Path, index_file: Path, name: str):
@@ -867,22 +804,6 @@ def ablation(datapath: Path, csv_file: Path, index_file: Path, name: str):
     train_set = ADE20KCommonScenesDataset(datapath, IMAGE_INPUT_SZ, OBJ_SEG_SZ, "train", hierarchy, synsets=False)
     train_loader = torch.utils.data.DataLoader(train_set, batch_size=DEF_BATCH_SIZE, shuffle=True, num_workers=NUM_WORKER)
     main(datapath, graph, hierarchy, train_loader, name, synsets=False)
-
-
-def disjoint_sup_EM(datapath: Path, csv_file: Path, index_file: Path, name: str, supervision_chance=1.0):
-    """
-    Testing the performance of a partially-supervised model, BUT using expectation
-    maximization instaed of backprop to handle missing data. I expect it to do slightly worse?
-    """
-    TRAIN_SAMPLES = 4
-    # DEBUG DEBUG DEBUG
-    #NUM_WORKER = 1
-    hierarchy = ADEWordnetHierarchy(csv_file, datapath, index_file)
-    graph = model_A(hierarchy, SGD_rather_than_EM=False).cuda()
-    train_set = ADE20KCommonScenesDataset(datapath, IMAGE_INPUT_SZ, OBJ_SEG_SZ, "train", hierarchy, partial_supervision_chance=supervision_chance, disjoint_partial_supervision=True)
-    train_loader = torch.utils.data.DataLoader(train_set, num_workers=NUM_WORKER, batch_sampler=PartialSupervisionSampler(train_set.supervision_groups,\
-            batch_size=DEF_BATCH_SIZE//TRAIN_SAMPLES))
-    main(datapath, graph, hierarchy, train_loader, name, BATCH_SIZE=DEF_BATCH_SIZE//TRAIN_SAMPLES, TRAIN_SAMPLES=TRAIN_SAMPLES, linear_unsup_weight_schedule=True)
 
 
 def visualize_segmentations(weightpath: Path, datapath: Path, csv_file: Path, index_file: Path, outpath: Path, num_tosave: int):
