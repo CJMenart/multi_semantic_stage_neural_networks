@@ -37,3 +37,7 @@ ade20k_common_scenes_v1.00
         
 This class also takes advantage of index_ade20k.pkl (which can be downlaoded from MIT's
 ADE20K website) and ade20k_wordnet_object_hierarchy.csv (which is again courtsey of "External Knowledge Graphs").
+
+===============================================================
+
+This branch (performance_experiments) represents the first round of experiments performed with the codebase for our paper, which evaluates how the inclusion of engineered knowledge and additional random variables can benefit performance. Experiments since then were performed on a version of the code with a couple of non-backwards-compatible upgrades/rewrites, which is why those experiments can only be replicated using other branches of the code.
