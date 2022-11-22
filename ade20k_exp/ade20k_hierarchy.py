@@ -14,6 +14,7 @@ from ade20k_exp import count_object_occurrences as count_obj
 import sys
 import logging
 logger = logging.getLogger(__name__)
+logger.propagate = False
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler(sys.stdout))
 
@@ -95,7 +96,17 @@ class ADEWordnetHierarchy:
         for leaf_idx in self.leaf_nodes_of[synset_idx]:
             synset_gt[seg_gt == leaf_idx] = 1.0
         return synset_gt
-        
+       
+    def ade_gt_to_synset_gt(self, ade_gt, synset_idx: int):
+        """
+        ade_gt is the original ADE index map--right after being transformed from color.
+        TODO under construction
+        """
+        synset_gt = torch.zeros_like(ade_gt, dtype=torch.float32)
+        for idx in self.leaf_nodes_of[synset_idx]:
+            synset_gt[ade_gt==idx] = 1.0
+        return synset_gt
+
     def valid_children_of(self, idx: int):
         return self.valid_children[idx]
         
@@ -149,7 +160,7 @@ class ADEWordnetHierarchy:
         print(f"Ade Objects here: {[self.objectnames[idx] for idx in np.unique(seg)]}")
         for key in data_dict:
             if '.n' in key and np.sum(data_dict[key]) > 0:
-                print(f"Contains {key}")                   
+                print(f"Contains {key}")
 
     def _leaf_nodes_of(self, idx: int):
         if idx < N_ADE_OBJ + 1:
