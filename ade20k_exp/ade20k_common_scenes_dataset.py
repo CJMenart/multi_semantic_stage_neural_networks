@@ -41,14 +41,11 @@ from torchvision.io import read_image
 from torchvision.transforms.functional import InterpolationMode
 from pathlib import Path
 import random
-import logging, sys
+import logging
 logger = logging.getLogger(__name__)
-logger.propagate = False
-logger.setLevel(logging.INFO)
-logger.addHandler(logging.StreamHandler(sys.stdout))
+logging.basicConfig(level=logging.INFO)
 
-DEBUG_SZ = 128
-DEBUG = False
+
 IMCLASSES = ['airport_terminal',
             'building_facade',
             'dining_room',
@@ -68,8 +65,7 @@ IMCLASSES = ['airport_terminal',
 
 
 class ADE20KCommonScenesDataset(Dataset):
-
-    def __init__(self, img_root_dir: Path, img_size: int, seg_size: int, partition: str, hierarchy, shrink_factor=1, partial_supervision_chance=0,pool_arrays=False,synsets=True):
+    def __init__(self, img_root_dir: Path, img_size: int, seg_size: int, partition: str, hierarchy, shrink_factor=1, partial_supervision_chance=0,disjoint_partial_supervision=False,synsets=True):
         """
         img_root_dir: The root folder of a partition of common scenes. Has subdirs, Atr Images Parts_1 Parts_2 Seg. Though we'll only use Images and Seg.
             Each of these subdirs should have test/train/val
@@ -88,15 +84,14 @@ class ADE20KCommonScenesDataset(Dataset):
         self.segresize = torchvision.transforms.Compose([
             torchvision.transforms.Resize(seg_size, interpolation=InterpolationMode.NEAREST),
             torchvision.transforms.CenterCrop(seg_size)])
-        tzero = torch.tensor([0], dtype=torch.int32,requires_grad=False)
-
+        tzero = torch.tensor([0.0], dtype=torch.int32,requires_grad=False)
+        self.seg_mapping = hierarchy.ade_to_seg_gt_map()
+       
         # load the whole thing into RAM! (Well, one partition of it anyway)
         logger.info(f"Loading {partition} Images and Segmentations...")        
         self._data = []
         self.supervision_groups = [[],[],[],[]]
         for class_idx, imclass in enumerate(IMCLASSES):
-            if DEBUG and len(self._data) >= DEBUG_SZ:
-                break
             impaths = (img_root_dir / "Images" / partition / imclass).glob("*.jpg")
             for i, impath in enumerate(impaths):
                 if i % shrink_factor > 0:
@@ -115,61 +110,56 @@ class ADE20KCommonScenesDataset(Dataset):
                         
                 # This prevents PyTroch from trying to keep reference to the data tensors
                 # I think
-                # or maybe breaks everything?
                 #img = img.tolist()
                 #seg = seg.tolist()
 
                 if partial_supervision_chance == 0:
-                    data_tuple = {'Image': img, 'ADEObjects': seg, 'ImageClass': class_idx}
+                    data_tuple = {'Image': img, 'ADEObjects': self.seg_mapping[seg], 'ImageClass': class_idx}
                 else:  # in partial supervision, only some of the variables may have ground truth
                     data_tuple = {'Image': img}
                     suptype=0
-                    if random.random() < partial_supervision_chance:          #len(self._data) % 4 in [0, 1]:
-                        data_tuple['ADEObjects'] = seg
-                        suptype+=1
-                    if random.random() < partial_supervision_chance:         #len(self._data) % 4 in [0, 2]:
-                        data_tuple['ImageClass'] = torch.tensor(class_idx)
-                        suptype+=2
+                    if disjoint_partial_supervision:
+                        if random.random() < partial_supervision_chance:
+                            if random.random() < 0.5:
+                                data_tuple['ADEObjects'] = self.seg_mapping[seg]
+                                suptype = 1
+                            else:
+                                data_tuple['ImageClass'] = class_idx
+                                suptype = 2
+                        # DEBUG EBUG DEBUG                        
+                        assert suptype > 0
+                    else:  # independently roll to discard ground truth
+                        assert not disjoint_partial_supervision
+                        if random.random() < partial_supervision_chance:          #len(self._data) % 4 in [0, 1]:
+                            data_tuple['ADEObjects'] = self.seg_mapping[seg]
+                            suptype+=1
+                        if random.random() < partial_supervision_chance:         #len(self._data) % 4 in [0, 2]:
+                            data_tuple['ImageClass'] = class_idx
+                            suptype+=2
                     self.supervision_groups[suptype].append(len(self._data))
-                self._data.append(data_tuple)
-
+                self._data.append((data_tuple, seg))
                 logger.debug(f"Loaded {impath}")
        
-        self.seg_mapping = hierarchy.ade_to_seg_gt_map()
         self.synsets = synsets
         self.hierarchy = hierarchy
-        self.pool_arrays = pool_arrays
-        self.num_ade = len(hierarchy.valid_indices()[0])
         logger.info(f"{partition} Images and Segmentations loaded!")
-        logger.debug(f"pool_arrays: {self.pool_arrays}")
         
     def __len__(self):
         return len(self._data)
     
     def __getitem__(self, idx):    
-    
-        data_tuple = self._data[idx].copy()
-        seg = data_tuple['ADEObjects']
+        #return {k: v.detach().clone() for k, v in self._data[idx].items()}
+        #data_tuple = {k: torch.tensor(v) for k, v in self._data[idx].items()} 
+        data_tuple, seg = self._data[idx]
+        data_tuple = data_tuple.copy()
 
         if self.synsets and 'ADEObjects' in data_tuple:
             synset_dict = {}
             for synset_idx in self.hierarchy.valid_indices()[1]:
                 syn_gt = self.hierarchy.ade_gt_to_synset_gt(seg, synset_idx)
-                if self.pool_arrays:
-                    syn_gt = torch.max(syn_gt)
                 synset_dict[self.hierarchy.ind2synset[synset_idx]] = syn_gt
-        
-            data_tuple.update(synset_dict)
-
-        # now that we have the synsets, transform seg to our system of indices and get it ready         
-        seg = self.seg_mapping[seg]
-        if self.pool_arrays:
-            seg = torch.nn.functional.one_hot(seg.long(), num_classes=self.num_ade)
-            seg = torch.max(torch.max(seg, dim=0)[0], dim=0)[0].float()
-            #logger.debug(f"seg reduced to multi-classification: val {seg} w/shape {seg.shape} and type {seg.type()}")
             
-        data_tuple['ADEObjects'] = seg
+            data_tuple.update(synset_dict)
         
         return data_tuple
     
-
