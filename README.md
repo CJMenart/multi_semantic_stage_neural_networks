@@ -10,30 +10,30 @@ We use MIT's ADE20K dataset, which can be obtained here: <https://groups.csail.m
 We use the partitions of this data created by "A Framework for Explainable Deep Neural Models Using External Knowledge Graphs". We have included three csv's under ade20k_exp/ which show which images are in the train, validation, and test partitions if you want to run using the exact same splits.
 
 As noted in ade20k_exp/, the code expects these files to be laid out as follows:
-ade20k_common_scenes_v1.00
-|
-+-- Images
-    |
-    +--test
-        |
-        +-- Contains 10% of data
-    +--train
-        |  
-        +-- Contains 85% of data
-    +--val
-        |
-        +-- Contains 5% of data
-    Seg
-    |
-    +--test
-        |
-        +-- Contains 10% of data
-    +--train
-        |  
-        +-- Contains 85% of data
-    +--val
-        |
-        +-- Contains 5% of data
+ade20k_common_scenes_v1.00  
+|  
++-- Images  
+&emsp;&emsp;|  
+&emsp;&emsp;+--test  
+&emsp;&emsp;&emsp;&emsp;|  
+&emsp;&emsp;&emsp;&emsp;+-- Contains 10% of data  
+&emsp;&emsp;+--train  
+&emsp;&emsp;&emsp;&emsp;|  
+&emsp;&emsp;&emsp;&emsp;+-- Contains 85% of data  
+&emsp;&emsp;+--val  
+&emsp;&emsp;&emsp;&emsp;|  
+&emsp;&emsp;&emsp;&emsp;+-- Contains 5% of data  
++-- Seg  
+&emsp;&emsp;|  
+&emsp;&emsp;+--test  
+&emsp;&emsp;&emsp;&emsp;|  
+&emsp;&emsp;&emsp;&emsp;+-- Contains 10% of data  
+&emsp;&emsp;+--train  
+&emsp;&emsp;&emsp;&emsp;|  
+&emsp;&emsp;&emsp;&emsp;+-- Contains 85% of data  
+&emsp;&emsp;+--val  
+&emsp;&emsp;&emsp;&emsp;|  
+&emsp;&emsp;&emsp;&emsp;+-- Contains 5% of data  
         
 This class also takes advantage of index_ade20k.pkl (which can be downlaoded from MIT's
 ADE20K website) and ade20k_wordnet_object_hierarchy.csv (which is again courtsey of "External Knowledge Graphs").
