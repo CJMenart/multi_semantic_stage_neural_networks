@@ -9,7 +9,7 @@ We use MIT's ADE20K dataset, which can be obtained here: <https://groups.csail.m
 
 We use the partitions of this data created by "A Framework for Explainable Deep Neural Models Using External Knowledge Graphs". We have included three csv's under ade20k_exp/ which show which images are in the train, validation, and test partitions if you want to run using the exact same splits.
 
-As noted in ade20k_exp/, the code expects these files to be laid out as follows:
+As noted in ade20k_exp/, the code expects these files to be laid out as follows:  
 ade20k_common_scenes_v1.00  
 |  
 +-- Images  
