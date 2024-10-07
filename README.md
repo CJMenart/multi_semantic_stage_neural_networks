@@ -30,6 +30,7 @@ Different subfolders primarily contain differnet experiments from the associated
 
 The "Anchors" folder contains a pulled copy of the publicly-released code for the Anchors XAI method (). It is called by some of the explainability experiments.
 
+NOTE: This branch was published in advance of the dissertation. To run different experiments with the corresponding version of the code, you may simply want to check out the appropriate branch from this repository.
 
 ### Other Notes
 
