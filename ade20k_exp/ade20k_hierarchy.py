@@ -10,7 +10,7 @@ import csv
 import numpy as np
 import torch
 from pathlib import Path
-from ade20k_exp import count_object_occurrences as count_obj
+from . import count_object_occurrences as count_obj
 import sys
 import logging
 logger = logging.getLogger(__name__)

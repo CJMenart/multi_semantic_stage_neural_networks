@@ -44,7 +44,7 @@ import random
 import logging, sys
 logger = logging.getLogger(__name__)
 logger.propagate = False
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler(sys.stdout))
 
 DEBUG_SZ = 128

@@ -1,15 +1,15 @@
 import torch
-from ade20k_exp.ade20k_experiments import main, PartialSupervisionSampler, SynsetFromADEPredictor, ObjectsToImClass, SynsetFromFeaturePredictor
-from ade20k_exp.ade20k_common_scenes_dataset import ADE20KCommonScenesDataset, IMCLASSES
-from utils import dict_to_gpu
+from .ade20k_experiments import main, PartialSupervisionSampler, SynsetFromADEPredictor, ObjectsToImClass, SynsetFromFeaturePredictor
+from .ade20k_common_scenes_dataset import ADE20KCommonScenesDataset, IMCLASSES
+from ..utils import dict_to_gpu
 from sklearn import tree
 import sklearn.metrics
-from graphical_model import NeuralGraphicalModel
-from my_resnet import BasicBlock, ResNet
+from ..graphical_model import NeuralGraphicalModel
+from ..my_resnet import BasicBlock, ResNet
 import sys
 from pathlib import Path
-from random_variable import *
-from ade20k_exp.ade20k_hierarchy import ADEWordnetHierarchy
+from ..random_variable import *
+from .ade20k_hierarchy import ADEWordnetHierarchy
 from torch.utils.data import Dataset
 from torchvision import transforms
 from collections import OrderedDict
@@ -24,7 +24,7 @@ from matplotlib import pyplot as plt
 from dtreeviz.trees import dtreeviz 
 import timeit
 # Anchors XAI method
-from anchor import anchor_tabular
+from ..anchor import anchor_tabular
 import logging
 logger = logging.getLogger(__name__)
 logger.propagate = False
@@ -453,7 +453,7 @@ def explain_with_decision_tree(graph: NeuralGraphicalModel, test_set: Dataset, h
                     logger.debug(name_map[idx]) 
         pred_scenes, pred_objects, scene_marginals = sample_joint_distribution_bool(graph, data, synset_names, NPASS)
 
-        tr = decision_tree_from_joint_samples(pred_scenes, pred_objects, name_map, nade)
+        tr = decision_tree_from_joint_samples(pred_scenes, pred_objects, name_map, nade, max_depth=TUNED_TREEDEPTH)
         # THIS IS ESSENTIALLY DEBUG OUTPUT
         logger.info(f"Tree.node_count: {tr.tree_.node_count}")
         logger.info(f"Tree.max_features: {tr.max_features_}")

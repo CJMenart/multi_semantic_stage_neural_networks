@@ -1,11 +1,8 @@
 """
-Classes for modeling random variables inside a Neural Graphical Model.
-
-TODO Reintroduce a 'latent' flag so that we don't down-weight loss for latent variables when doing partially 
-supervised training.
+Classes for modeling random variables inside a Multi-Semantic-Stage Neural Network / NeuralGraphicalModel().
 
 TODO so if we encoded categorical distributions with N-1 logits instead of N logits we could fold BooleanVariable
-into CategoricalVariable. That would be neat, maybe?
+into CategoricalVariable. That would be neat, maybe? But less intuitive for most users.
 
 """
 import torch
@@ -15,8 +12,8 @@ import warnings
 from torch.utils.tensorboard import SummaryWriter
 from typing import List
 from torch.nn.parameter import Parameter
-from torch._six import inf
-from mixture_same_family_fixed import MixtureSameFamilyFixed
+#from torch._six import inf
+from .mixture_same_family_fixed import MixtureSameFamilyFixed
 import math
 import sys
 import logging
@@ -30,6 +27,7 @@ USE_CHECKPOINTING=False
 class RandomVariable(torch.nn.Module):
     """
     Abstract class (hardly more than an interface, really) for different kinds of random variables in a Neural Graphical Model.
+    Note that most custom RandomVariables should inherit not only from this but from TypicalRandomVariable (defined below).
     
     It is run forward using Monte Carlo sampling, and trained using SGD (or optionally EM!) through samples of the variable.
     (This is done using re-parameterized sampling, for continuous variables, and with a trick like REINFORCE or Gumbel for discrete ones.)
@@ -69,7 +67,7 @@ class RandomVariable(torch.nn.Module):
     Note that in the above methods, 'dist_params' is a list of tensors--with length greater than 1 if a variable has multiple predictors.
     """
 
-    def __init__(self, name: str, predictor_fns: List[torch.nn.Module], per_prediction_parents: List[List['RandomVariable']], can_be_supervised: bool):
+    def __init__(self, name: str, predictor_fns: List[torch.nn.Module], per_prediction_parents: List[List['RandomVariable']], can_be_supervised=True):
         """
         predictor_fns: each an nn.module that takes the corresponding parents and spits out dist_params for this variable's distribution
         Any predictor that takes 0 parents (i.e. a prior) should take the batch size of the current forward pass as an integer input.
@@ -95,6 +93,7 @@ class RandomVariable(torch.nn.Module):
             parent._register_child(self)
         self.children_variables = []
         self.can_be_supervised = can_be_supervised
+        self.fully_defined_if_supervised = True  # only rare subclasses will have this be False
            
     def _register_child(self, child: 'RandomVariable'):
         assert(child not in self.children_variables)  # not sure how I'd want to handle that 
@@ -142,11 +141,16 @@ class RandomVariable(torch.nn.Module):
     def loss_and_nlogp(self, dist_params, filled_in_dist_params, gt, sampled_value, total_downstream_nll, SGD_rather_than_EM=True):
         raise NotImplementedError
 
+    # Called by NeuralGraphicalModel when forward pass is done--clear anything that was cached between forward pass and loss computation
+    def clear_cache(self):
+        return
+
 
 class TypicalRandomVariable(RandomVariable):
     """
     Abstract class (a real abstract class, this time) for the majority of RandomVariables.
     The majority of RandomVariable logic (including a lot of the logic we discuss in the papers) lives here!
+    Essentially every RandomVariable should inherit from this. The only ones who don't are doing something weird.
     
     'dist_params' to a TypicalRandomVariable are organized, for each predictor, in a tensor with dimensions 
     'batch, channel, followed by any number of spatial dimensions'. Along dimension 1, 'channel', are packed 
@@ -155,27 +159,27 @@ class TypicalRandomVariable(RandomVariable):
     Stuff a child class still has to implement:
         _output_to_index(self, sampled_value):
         Takes the outputs in sampled_values and packs them back into an index in the same format as ground truth.
+        In many cases, this will be an identity function (do nothing) but for CategoricalVariables, for instance,
+        the sampled values injested by downstream functions are one-hot vectors, while gt is given as integer indices.
 
-        _dist_params_to_pred_logits(dist_params):
-        Take dist_params. Apply temperature scaling, as necessary, and move the 
-        'channel' dimension to the last dimension
-
-        _pred_logits_to_weighted_logits(pred_logits):
-        Take the features from the previous function and apply combination weights
-
+        _dist_params_to_logits(dist_params):
+        Take dist_params. Apply temperature scaling, as necessary, and combination weighting if appropriate.
+        Move the 'channel' dimension to the last dimension
+        
         _weighted_logits_to_model(weighted_logits):
-        Take the features from the previous function and produce a torch.distribution
+        Take the features from the previous function and produce a torch.distribution object
 
         _differentiable_kl_divergence(p, q):
-        KL divergence between two instance of _weighted_logits_to_model output. 
-        Torch implements these, but some of their implementations are not properly differentiable.
+        KL divergence between two instances of _weighted_logits_to_model output. 
+        Torch implements these, but some of their implementations are not correct for the backward pass.
 
         _nlog_product(combined_dist, multiple_dists):
         The -log of the un-normalized product of multiple distributions of this variable's type. 
         The inputs are stacked along the first dimension.
+        (CURRENTLY UNUSED)
 
         _log_extra_dist_params(self, pred_logits, summary_writer, **kwargs):
-        TypicalRandomVariable logs each channel by default--but use this to log anything additional.
+        TypicalRandomVariable only logs calibration parameters--use this to log the other interesting things about your variable.
 
         And the methods from RandomVariable which are still left to the concrete class:
         
@@ -197,6 +201,7 @@ class TypicalRandomVariable(RandomVariable):
         self.num_channels = num_channels
         self.gradient_estimator = gradient_estimator
         self._initialized = False
+        self._cached_model = None
         assert self.gradient_estimator in ['REINFORCE', 'reparameterize'], "gradient_estimator option unrecognized"
     
     def add_predictor(self, parents, fn):
@@ -258,9 +263,10 @@ class TypicalRandomVariable(RandomVariable):
         
     def _dist_params_to_model(self, dist_params):
         assert len(dist_params) == self.num_preds, "Wrong number of dist_params"
-        pred_logits = self._dist_params_to_pred_logits(dist_params)
-        weighted_logits = self._pred_logits_to_weighted_logits(pred_logits)
-        return self._weighted_logits_to_model(weighted_logits)
+        weighted_logits = self._dist_params_to_logits(dist_params)
+        model = self._weighted_logits_to_model(weighted_logits)
+        self._cached_model = model
+        return model
         
     def log_dist_params(self, dist_params, summary_writer: SummaryWriter, **kwargs):
         #pred_logits = self._dist_params_to_pred_logits(dist_params)
@@ -271,17 +277,57 @@ class TypicalRandomVariable(RandomVariable):
         for key in self.combination_weights:
             summary_writer.add_scalar(self.name + f"/cbweight_{key}A", self.combination_weights[key][0], **kwargs)
             summary_writer.add_scalar(self.name + f"/cbweight_{key}B", self.combination_weights[key][1], **kwargs)
+            summary_writer.add_scalar(self.name + f"/cbcalibr_{key}A", self._combination_weight_calibration[key][0], **kwargs)
+            summary_writer.add_scalar(self.name + f"/cbcalibr_{key}B", self._combination_weight_calibration[key][1], **kwargs)
         self._log_extra_dist_params(dist_params, summary_writer, **kwargs)
         
+    def prediction_loss(self, gt, sampled_value, model, total_downstream_nll, SGD_rather_than_EM):
+        """
+        Just the part of loss_and_nlogp that does the "normal" loss based on your final prediction 
+        (This would be your CE loss, MSE loss, to relate to 'typical' deep learning loss setup)
+        """
+        if gt is not None:
+            # aka regular CE loss
+            nll = self.dist_loss(model, gt)
+            loss = nll + self._extra_dist_loss(model, gt)
+            #nlogp = nll
+        else:
+            if SGD_rather_than_EM:
+                if self.gradient_estimator == 'REINFORCE':
+                    #TODO: Could make this REINFORCE 'lowest-variance' reinforce as seen in https://arxiv.org/pdf/1308.3432v1.pdf
+                    log_prob = model.log_prob(self._output_to_index(sampled_value))
+                    # NOTE: I'm not sure about efficiency of movedim(). Might it be faster to expand downstream_nll?
+                    # TODO: Does this use of total_downstream_nll have any problems with the current nlogproduct penalty?? Haven't decided for sure
+                    loss = log_prob.permute(*list(range(1, log_prob.dim())), 0) * total_downstream_nll.detach()
+                    loss = loss.permute(-1, *list(range(0, loss.dim()-1)))
+                elif self.gradient_estimator == 'reparameterize':
+                    # in this case regular gradient will be handled by Torch on backward pass
+                    loss = None
+                else:
+                    raise AssertionError("self.gradient_estimator unrecognized.")
+            else:  # EM 
+                nll = self.dist_loss(model, self._output_to_index(sampled_value))
+                loss = nll + self._extra_dist_loss(model, sampled_value)
+            #nlogp = None
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"{self.name} basic loss shape: {loss.shape}")
+        return loss
+        
     def loss_and_nlogp(self, dist_params, filled_in_dist_params, gt, sampled_value, total_downstream_nll, SGD_rather_than_EM=True):
+        """
+        Big not-quite-god function which handles the loss and nlogp computations. There's a lot of different cases to handle:
+        This function checks whether the variable is currently supervised or not, how many predictors it has, how many predictors
+        were actually *run* or not, which predictors are part of the DAG-subgraph of the MSSNN chosen for this forwad pass (in the cyclic case),
+        etc.
+        """
         self.initialize()
         
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"{self.name}.loss_and_nlogp:")
-            logger.debug(f"dist_params: {dist_params}")
-            logger.debug(f"filled_in_dist_params: {filled_in_dist_params}")
-            logger.debug(f"gt: {gt}")
-            logger.debug(f"sampled_value: {sampled_value}")
+            logger.debug(f"dist_params shape: {[dp.shape if dp is not None else None for dp in dist_params]}")
+            logger.debug(f"filled_in_dist_params shape: {[dp.shape if dp is not None else None for dp in filled_in_dist_params]}")
+            logger.debug(f"gt shape: {gt.shape}")
+            logger.debug(f"sampled_value shape: {sampled_value.shape}")
             logger.debug(f"{self.name} total_downstream_nll: {total_downstream_nll}")
 
         # Observation-only variables should never generate any loss or nlogp
@@ -292,35 +338,12 @@ class TypicalRandomVariable(RandomVariable):
         nlogp = None 
         
         if any([dp is not None for dp in dist_params]):
-            pred_logits = self._dist_params_to_pred_logits(dist_params)
-            weighted_logits = self._pred_logits_to_weighted_logits(pred_logits)
-            model = self._weighted_logits_to_model(weighted_logits)
-
-            if gt is not None:
-                # aka regular CE loss
-                nll = -model.log_prob(gt)                
-                loss = nll + self._extra_dist_loss(model, gt)
-                #nlogp = nll
+            weighted_logits = self._dist_params_to_logits(dist_params)
+            if self._cached_model is not None:
+                model = self._cached_model
             else:
-                if SGD_rather_than_EM:
-                    if self.gradient_estimator == 'REINFORCE':
-                        #TODO: Could make this REINFORCE 'lowest-variance' reinforce as seen in https://arxiv.org/pdf/1308.3432v1.pdf
-                        log_prob = model.log_prob(self._output_to_index(sampled_value))
-                        # NOTE: I'm not sure about efficiency of movedim(). Might it be faster to expand downstream_nll?
-                        # TODO: Does this use of total_downstream_nll have any problems with the current nlogproduct penalty?? Haven't decided for sure
-                        loss = log_prob.permute(*list(range(1, log_prob.dim())), 0) * total_downstream_nll.detach()
-                        loss = loss.permute(-1, *list(range(0, loss.dim()-1)))
-                    elif self.gradient_estimator == 'reparameterize':
-                        # in this case regular gradient will be handled by Torch on backward pass
-                        loss = None
-                    else:
-                        raise AssertionError("self.gradient_estimator unrecognized.")
-                else:  # EM 
-                    nll = -model.log_prob(self._output_to_index(sampled_value))
-                    loss = nll + self._extra_dist_loss(model, sampled_value)
-                #nlogp = None
-         
-                logger.debug(f"{self.name} basic loss: {loss}")
+                model = self._weighted_logits_to_model(weighted_logits)
+            loss = self.prediction_loss(gt, sampled_value, model, total_downstream_nll, SGD_rather_than_EM)
      
         # Then handle the nlogp--which happens if there is ground truth whose value we tried to predict, or multiple predictions
         if (gt is not None and any([dp is not None for dp in dist_params])):
@@ -333,7 +356,7 @@ class TypicalRandomVariable(RandomVariable):
             # This section is very memory-intensive but doesn't have to be recorded
             with torch.no_grad():
                 multiple_weighted_dists = self._weighted_logits_to_model([torch.stack([pl for pl in weighted_logits if pl is not None], dim=0)])
-                consensus_target = model  # self._weighted_logits_to_model([wl.detach() if wl is not None else None for wl in weighted_logits])    
+                consensus_target = model 
                 nlogp = self._differentiable_kl_divergence(consensus_target, multiple_weighted_dists).sum(0)        
         
         # ==========================================================================
@@ -342,33 +365,56 @@ class TypicalRandomVariable(RandomVariable):
         # kl divergence here is just an 'arbitrary' penalty to make all predictors try to agree.
         # But it is elegant because it is the same as the NLL of a point, if it is a point distribution. 
         # So if there is no ground truth, we check KL divergence from the consensus anwer, otherwise the NLL of ground truth.
-        if ((gt is not None) + np.sum([dp is not None for dp in filled_in_dist_params]) >= 2):
-            # make a torch.dist of all the predicted distributions stacked up
-            # and make the kl divergence broadcast by putting 'prediction' in front dimension
-            filled_pred_logits = self._dist_params_to_pred_logits(filled_in_dist_params)
-            logger.debug(f"{self.name} prediction_tempscales: {self.prediction_tempscales}")
-            multiple_dists = self._weighted_logits_to_model([torch.stack([pl for pl in filled_pred_logits if pl is not None], dim=0)])
+        if ((gt is not None) and not any([dp is not None for dp in dist_params]) and any([dp is not None for dp in filled_in_dist_params])) \
+                or (np.sum([dp is not None for dp in filled_in_dist_params]) >= 2):
+            #if np.sum([dp is not None for dp in filled_in_dist_params]) >= 2:
             
             if gt is None:
+           
+                
+                orig_logits = self._dist_params_to_logits(dist_params, use_cweights=False)
+                orig_dists = self._weighted_logits_to_model([torch.stack([pl for pl in orig_logits if pl is not None], dim=0)])
+           
                 #re-compute final distribution but detached
-                consensus_target = self._weighted_logits_to_model([wl.detach() if wl is not None else None for wl in weighted_logits])    
-                agreement_loss = self._differentiable_kl_divergence(consensus_target, multiple_dists)        
+                with torch.no_grad():
+                    consensus_target = self._weighted_logits_to_model([wl.detach() if wl is not None else None for wl in weighted_logits])    
+                    
+                agreement_loss = self._differentiable_kl_divergence(consensus_target, orig_dists).mean(0)
+                
+                reconstructors = [f for idx, f in enumerate(filled_in_dist_params) if dist_params[idx] is None]
+                if len(reconstructors) > 0:
+                    reconstructor_logits = self._dist_params_to_logits(reconstructors, use_cweights=False)
+                    reconstructor_dists = self._weighted_logits_to_model([torch.stack([pl for pl in reconstructor_logits if pl is not None], dim=0)])
+                    agreement_loss = agreement_loss + self.dist_loss(reconstructor_dists, sampled_value).mean(0)
             else:
+                # make a torch.dist of all the predicted distributions stacked up
+                # and make the kl divergence broadcast by putting 'prediction' in front dimension
+                filled_pred_logits = self._dist_params_to_logits(filled_in_dist_params, use_cweights=False)
+                #logger.debug(f"{self.name} prediction_tempscales: {self.prediction_tempscales}")
+                multiple_dists = self._weighted_logits_to_model([torch.stack([pl for pl in filled_pred_logits if pl is not None], dim=0)])
                 # this boils down to CE/NLL loss because gt is a point distribution 
-                agreement_loss = -multiple_dists.log_prob(gt) + self._extra_dist_loss(multiple_dists, gt)
+                agreement_loss = self.dist_loss(multiple_dists, gt) + self._extra_dist_loss(multiple_dists, gt)
+                agreement_loss = agreement_loss.mean(0)  # avg across predictors
+
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"{self.name} consensus target is gt")
+                    logger.debug(f"{self.name} gt shape: {gt.shape}")
         
-            agreement_loss = agreement_loss.sum(0)
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"{self.name} agreement loss: {agreement_loss}")
+                logger.debug(f"{self.name} agreement loss shape (before avg across predictors): {agreement_loss.shape}")
             
             loss = agreement_loss if loss is None else loss + agreement_loss
         
         while loss is not None and loss.dim() > 1:
             loss = torch.mean(loss, dim=-1)
         while nlogp is not None and nlogp.dim() > 1:
-            nlogp = torch.mean(nlogp, dim=-1)
+            with torch.no_grad():
+                nlogp = torch.mean(nlogp, dim=-1)
         
         return loss, nlogp
+
+    def dist_loss(self, model, gt_or_sample):
+        return -model.log_prob(gt_or_sample)
 
     def _extra_dist_loss(self, model, gt_or_sample):
         # any extra supervised loss terms as a result of the distribution 
@@ -383,19 +429,17 @@ class TypicalRandomVariable(RandomVariable):
         # So for categorical variable this is argmax, for boolean round, for gaussian identity
         #torch.argmax(sampled_value,dim=1)
 
-    def _dist_params_to_pred_logits(self, dist_params):
+    def _dist_params_to_logits(self, dist_params, use_cweights=True):
         raise NotImplementedError
-       
-    def _pred_logits_to_weighted_logits(self, pred_logits):
-        raise NotImplementedError
-        
+               
     def _weighted_logits_to_model(self, weighted_logits):
         raise NotImplementedError
         
+    # although PyTorch implements many KL Divergences, most of their implementations are not differentiable
     def _differentiable_kl_divergence(self, p, q):
         raise NotImplementedError
         
-    # not actually used right now haha might delete
+    # not actually used right now--artifact of alternative ideas for fusion
     def _nlog_product(self, combined_dist, multiple_dists):
         raise NotImplementedError
 
@@ -417,19 +461,23 @@ class TypicalRandomVariable(RandomVariable):
     
     def estimate_distribution_from_dists(self, dist_params, weights): 
         raise NotImplementedError
+        
+    def clear_cache(self):
+        self._cached_model = None
 
 
 class CategoricalVariable(TypicalRandomVariable):
     """
     Represents a discrete (and therefore non-differentiable) variable in our model. 
     We use the REINFORCE trick or Gumbel Pass-Through to "back-propagate through it" anyway.
-    (Gumbel is recommended if your variable has spatial dimensions or >> single-digit numbers of 
-    categories.)
+    (Gumbel is tentatively the recommended one if your variable has 
+    spatial dimensions or >> single-digit numbers of categories.)
     
     Note: This is written so that the discrete variable does not have to be a single fixed size--
     i.e. you can do dense prediction with convolutions etc.
     
-    Ground truth should take the form of indices--there is no 'category' dimension in ground truth.
+    Ground truth should take the form of indices--to follow PyTorch convention, 
+    there is no 'category' dimension in ground truth.
     
     Output from this variable, however, has a 'channel/category' dimension (dimension 1), which NNs 
     which take that value as input will more easily understand. Similarly, inputs are pre-softmax 'logits' 
@@ -445,8 +493,8 @@ class CategoricalVariable(TypicalRandomVariable):
         if all([dp is None for dp in dist_params]):
             return
 
-        pred_logits = self._dist_params_to_pred_logits(dist_params)
-        weighted_logits = self._pred_logits_to_weighted_logits(pred_logits)
+        pred_logits = self._dist_params_to_logits(dist_params, use_cweights=False)
+        weighted_logits = self._dist_params_to_logits(dist_params)
         final = self._weighted_logits_to_model(weighted_logits)
         
         for i in range(self.num_preds):
@@ -470,14 +518,13 @@ class CategoricalVariable(TypicalRandomVariable):
                 one_hot = torch.nn.functional.one_hot(category, num_classes=self.num_channels).float()
             elif self.gradient_estimator == 'reparameterize':
                 # tempscale for gumbel already applied in dist_params_to_model
-                # we are using 'hard' so that DNNs don't learn to tell supervised apart from gumbel-produced inputs. Reasonable???
-                one_hot = gumbel_softmax(model.logits, hard=True, dim=-1)
+                one_hot = gumbel_softmax(model.logits, hard=False, dim=-1)
             else:
                 raise AssertionError("self.gradient_estimator unrecognized.")
 
         return one_hot.permute(0, -1, *list(range(1, one_hot.dim()-1)))
         
-    def _dist_params_to_pred_logits(self, dist_params):
+    def _dist_params_to_logits(self, dist_params, use_cweights=True):
         # probs emerge in format 'batch, class, height, width', listed over 'prediction'
         # if there is a height and width it must be re-ordered.
         """
@@ -486,13 +533,22 @@ class CategoricalVariable(TypicalRandomVariable):
         last dimension.
         """        
         pred_logits = []
+        if use_cweights:
+            combination_weights = self.get_combination_weights(dist_params)
+
         for i, dist_param in enumerate(dist_params):
             if dist_param is None:
                 pred_logits.append(dist_param)
                 continue 
             assert list(dist_param.shape)[1] == self.num_channels, f"Wrong number of classes ({len(dist_param.shape)[1]}, should be {self.num_channels})--could a tensor dimension be misordered?"
-            if not self.training:
+            
+            if not self.training and use_cweights:
+                dist_param = dist_param * (self.prediction_tempscales[i] * combination_weights[i])
+            elif not self.training:
                 dist_param = dist_param * self.prediction_tempscales[i]
+            elif use_cweights:
+                dist_param = dist_param * combination_weights[i]
+            
             # should we still do this reorder here?
             logits = dist_param.permute(0, *list(range(2, dist_param.dim())), 1)  # make class dim last
             assert logits.shape[-1] == self.num_channels
@@ -500,16 +556,6 @@ class CategoricalVariable(TypicalRandomVariable):
         
         # returned in 'batch, height/width/etc., class' and listed over 'prediction'
         return pred_logits
-        
-    def _pred_logits_to_weighted_logits(self, pred_logits):
-        combination_weights = self.get_combination_weights(pred_logits)
-        weighted_logits = []
-        for i, pred_logit in enumerate(pred_logits):
-            if pred_logit is None:
-                weighted_logits.append(None)
-            else:
-                weighted_logits.append(pred_logit*combination_weights[i])
-        return weighted_logits
         
     def _weighted_logits_to_model(self, weighted_logits):
         logits = torch.stack([wl for wl in weighted_logits if wl is not None], dim=-1).sum(-1)
@@ -564,7 +610,7 @@ class CategoricalVariable(TypicalRandomVariable):
             logger.debug(f"kl_divergence categorical: p.logits: {p.logits}")
         t = p.probs * (p.logits - q.logits)
         #t[(q.probs == 0).expand_as(t)] = inf
-        t[(p.probs == 0).expand_as(t)] = 0
+        #t[(p.probs == 0).expand_as(t)] = 0   # I THINK I can comment this one out too?
         return t.sum(-1)
         
     def _nlog_product(self, combined_dist, multiple_dists):
@@ -592,7 +638,7 @@ class BooleanVariable(TypicalRandomVariable):
     variable. You only need one channel instead of two for this variable, which saves on memory.
     """
     
-    def __init__(self, name: str, predictor_fns: List[torch.nn.Module], per_prediction_parents: List[List[RandomVariable]], gradient_estimator='reparameterize'):
+    def __init__(self, name: str, predictor_fns: List[torch.nn.Module], per_prediction_parents: List[List[RandomVariable]], gradient_estimator='REINFORCE'):
         super(BooleanVariable, self).__init__(name=name, predictor_fns=predictor_fns, per_prediction_parents=per_prediction_parents,\
                     num_channels=1, gradient_estimator=gradient_estimator)
                 
@@ -600,8 +646,8 @@ class BooleanVariable(TypicalRandomVariable):
         if all([dp is None for dp in dist_params]):
             return
 
-        pred_logits = self._dist_params_to_pred_logits(dist_params)
-        weighted_logits = self._pred_logits_to_weighted_logits(pred_logits)
+        pred_logits = self._dist_params_to_logits(dist_params, use_cweights=False)
+        weighted_logits = self._dist_params_to_logits(dist_params)
         final = self._weighted_logits_to_model(weighted_logits)
         
         for i in range(self.num_preds):
@@ -618,46 +664,41 @@ class BooleanVariable(TypicalRandomVariable):
             if self.gradient_estimator == 'REINFORCE':        
                 category = model.sample()
             else:
-                category = gumbel_sigmoid(model.logits, hard=False) 
+                category = gumbel_sigmoid(model.logits, hard=True) 
                 #torch.argmax(torch.nn.functional.gumbel_softmax([model.logits, torch.zeros_like(model.logits)], hard=True, dim=-1), dim=-1)
             
         return category
         
-    def _dist_params_to_pred_logits(self, dist_params):
+    def _dist_params_to_logits(self, dist_params, use_cweights=True):
         # probs emerge in format 'batch, class, height, width', listed over 'prediction'
         """
         From here out, we reorder the logits so that class is the LAST dimension. It has to be dim 1 in the predictors 
         because that's what torch likes, but for us to do broadcast operations and whatnot we'd prefer it to be the 
         last dimension.
         """        
+        if use_cweights:
+            combination_weights = self.get_combination_weights(dist_params)
         pred_logits = []
+        
         for i, dist_param in enumerate(dist_params):
             if dist_param is None:
                 pred_logits.append(dist_param)
                 continue 
-            if not self.training:
+            
+            if not self.training and use_cweights:
+                dist_param = dist_param * (self.prediction_tempscales[i] * combination_weights[i])
+            elif not self.training:
                 dist_param = dist_param * self.prediction_tempscales[i]
-            # should we still do this reorder here?
-            if len(dist_param.shape) > 1:
-                logits = dist_param.permute(0, *list(range(2, dist_param.dim())), 1)  # make class dim last
-            else:
-                logits = dist_param            
-            #assert logits.shape[-1] == 1
+            elif use_cweights:
+                dist_param = dist_param * combination_weights[i]
+                
+            # Booleans do not need a 'dimension' deidcated to probs, so skip the reordering we do for Categoricals
+            logits = dist_param            
             pred_logits.append(logits)
         
         # returned in 'batch, height/width/etc., class' and listed over 'prediction'
         return pred_logits
-        
-    def _pred_logits_to_weighted_logits(self, pred_logits):
-        combination_weights = self.get_combination_weights(pred_logits)
-        weighted_logits = []
-        for i, pred_logit in enumerate(pred_logits):
-            if pred_logit is None:
-                weighted_logits.append(None)
-            else:
-                weighted_logits.append(pred_logit*combination_weights[i])
-        return weighted_logits
-        
+                
     def _weighted_logits_to_model(self, weighted_logits):
         logits = torch.stack([wl for wl in weighted_logits if wl is not None], dim=-1).sum(-1)
         try:
@@ -684,6 +725,8 @@ class BooleanVariable(TypicalRandomVariable):
         while weights.dim() < probs.dim():
             weights = weights.unsqueeze(1)
         weighted = torch.sum(torch.mul(probs, weights/torch.sum(weights)), dim=-1)
+        # in case the floats are up to finite-precision tomfoolery again
+        weighted = torch.clamp(weighted, min=self.EPS, max=1-self.EPS)
         
         try:
             return torch.distributions.Bernoulli(weighted)
@@ -722,25 +765,31 @@ class BooleanVariable(TypicalRandomVariable):
 class GaussianVariable(TypicalRandomVariable):
     """
     Represents a continuous varibale (may be multi-dimensional) which is distributed in an isomorphic gaussian. Normally,
-    we use this for variables that we think have a deterministic true value, but which we have some uncertainty about, 
-    and the uncertainty (if it is small enough!) can be represented well enoguh by a gaussian distribution. When we sample the variable 
+    we use this for variables that we think have a (conditional) deterministic true value, but which we have some uncertainty about, 
+    and the uncertainty (if it is small enough!) can be represented well by a gaussian distribution. When we sample the variable 
     in _forward(), we use the 're-paramterization' trick so that gradients pass smoothly back through.
     """
     
-    def __init__(self, name: str, predictor_fns: List[torch.nn.Module], per_prediction_parents: List[List[RandomVariable]]):
+    def __init__(self, name: str, predictor_fns: List[torch.nn.Module], per_prediction_parents: List[List[RandomVariable]], min_std=None, clip=None, undercertainty_penalty=0.001):
         super(GaussianVariable, self).__init__(name=name, predictor_fns=predictor_fns, per_prediction_parents=per_prediction_parents, \
                     num_channels=2, gradient_estimator='reparameterize')
-        self.register_buffer('UNDERCERTAINTY_PENALTY_SCALE', torch.tensor([0.01], dtype=torch.float32,requires_grad=False), persistent=False)
+        self.register_buffer('UNDERCERTAINTY_PENALTY_SCALE', torch.tensor([undercertainty_penalty], dtype=torch.float32,requires_grad=False), persistent=False)
         # Start with a high predicted sigma by default to avoid large loss/divergent training
         #self.register_buffer('SIGMA_BIAS', torch.tensor([10.0], dtype=torch.float32, requires_grad=False), persistent=False)
+        self.min_std = None if min_std is None else torch.tensor(min_std, requires_grad=False)
+        # self.clip is not recommended, it was just something I tried one time.
+        if clip is None:
+            self.clip = None
+        else:
+            self.register_buffer('clip', torch.tensor(clip, dtype=torch.float32,requires_grad=False), persistent=False)
     
     def _log_extra_dist_params(self, dist_params, summary_writer: SummaryWriter, **kwargs):
 
         if all([dp is None for dp in dist_params]):
             return
 
-        pred_logits = self._dist_params_to_pred_logits(dist_params)
-        weighted_logits = self._pred_logits_to_weighted_logits(pred_logits)
+        pred_logits = self._dist_params_to_logits(dist_params, use_cweights=False)
+        weighted_logits = self._dist_params_to_logits(dist_params)
         final = self._weighted_logits_to_model(weighted_logits)
         
         for i in range(self.num_preds):
@@ -755,22 +804,42 @@ class GaussianVariable(TypicalRandomVariable):
         
     def _forward(self, dist_params, gt, SGD_rather_than_EM=True):
         if gt is not None:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"{self.name} shape of gt: {gt.shape}")
             return gt
         else:
             model = self._dist_params_to_model(dist_params)
             return model.rsample() if SGD_rather_than_EM else model.sample()
         
-    def _dist_params_to_pred_logits(self, dist_params):
+    def _dist_params_to_logits(self, dist_params, use_cweights=True):
+        
+        if use_cweights:
+            combination_weights = self.get_combination_weights(dist_params)
         
         pred_logits = []
         for i, dist_param in enumerate(dist_params):
             if dist_param is None:
                 pred_logits.append(dist_param)
                 continue 
-                            
-            if not self.training:
+            
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"{self.name} shape of gaus logit: {dist_param.shape}")
+
+            if not self.training and use_cweights:
+                weight = self.prediction_tempscales[i] * combination_weights[i]
+            elif not self.training:
+                weight = self.prediction_tempscales[i]
+            elif use_cweights:
+                weight = combination_weights[i]
+            else:
+                weight = None 
+            
+            if weight:
+                # TODO trying out bounding the weight
+                weight = weight.le(self.ONE).float()*torch.exp(torch.min(weight, self.ONE)-self.ONE) + weight.gt(self.ONE).float()*weight
+                # ===============================
                 mu, pre_sigma = torch.chunk(dist_param, 2, dim=1)
-                pre_sigma = pre_sigma / self.prediction_tempscales[i]
+                pre_sigma = torch.minimum(self.ZERO, pre_sigma) * weight + torch.maximum(self.ZERO, pre_sigma) / weight
                 dist_param = torch.cat([mu, pre_sigma], dim=1)
             
             logits = dist_param.permute(0, *list(range(2, dist_param.dim())), 1)  # make channel dim last        
@@ -780,36 +849,39 @@ class GaussianVariable(TypicalRandomVariable):
         # returned in 'batch, height/width/etc., channel' and listed over 'prediction'
         return pred_logits
         
-    def _pred_logits_to_weighted_logits(self, pred_logits):
-        combination_weights = self.get_combination_weights(pred_logits)
-        weighted_logits = []
-        for i, pred_logit in enumerate(pred_logits):
-            if pred_logit is None:
-                weighted_logits.append(None)
-            else:
-                mu, pre_sigma = torch.chunk(pred_logit, 2, dim=-1)
-                pre_sigma = pre_sigma * combination_weights[i]
-                pred_logit = torch.cat([mu, pre_sigma], dim=-1)
-                weighted_logits.append(pred_logit)
-        return weighted_logits
-        
     def _weighted_logits_to_model(self, weighted_logits):
     
         logits = torch.stack([wl for wl in weighted_logits if wl is not None], dim=-1)    
         mu, pre_sigma = torch.chunk(logits, 2, dim=-2)
         
-        #pre_sigma = pre_sigma + self.SIGMA_BIAS  # To have high uncertainty early in training
+        # convert logits to actual std-dev
         sigma = pre_sigma.le(self.ZERO).float()*torch.exp(torch.min(pre_sigma, self.ONE)) + pre_sigma.gt(self.ZERO).float()*(pre_sigma+self.ONE) + self.EPS
-        new_sigma = torch.sqrt(self.ONE/torch.sum(torch.pow(self.ONE/sigma, 2), dim=-1))
-        new_mu = torch.sum(mu*torch.pow(sigma,2), dim=-1)/torch.sum(torch.pow(sigma,2),dim=-1)
-        
+        if self.min_std:
+            sigma = sigma + self.min_std
+
+        # iteratively multiple gaussians together
+        # new_sigma and nu_mu are rolling result
+        new_sigma = torch.select(sigma, -1, 0)
+        new_mu    = torch.select(mu, -1, 0)
+        for pidx in range(1, logits.shape[-1]):
+            added_sigma = torch.select(sigma, -1, pidx)
+            added_mu    = torch.select(mu, -1, pidx)
+
+            new_mu    = (new_mu*torch.pow(added_sigma,2) + added_mu*torch.pow(new_sigma,2))/(torch.pow(new_sigma,2) + torch.pow(added_sigma,2))
+            new_sigma = torch.sqrt(self.ONE / (self.ONE/torch.pow(new_sigma,2) + self.ONE/torch.pow(added_sigma,2)))
+
         try:
             model = torch.distributions.Normal(loc=torch.squeeze(new_mu, dim=-1), scale=torch.squeeze(new_sigma, dim=-1))
         except ValueError as e:
             logger.error(f"{self.name} recieved value error: {e}")
             torch.set_printoptions(profile="full")
-            logger.error(f"Tempscales: {self.prediction_tempscales}")
+            logger.error(f"weighted_logits: {weighted_logits}")
             raise ValueError
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"{self.name} new_sigma min: {torch.min(new_sigma)}")
+            logger.debug(f"{self.name} model.std min: {torch.min(model.stddev)}")
+
         return model 
         
     def _extra_dist_loss(self, model, gt_or_sample):
@@ -821,9 +893,12 @@ class GaussianVariable(TypicalRandomVariable):
         """
         MSE = torch.pow(model.mean - gt_or_sample, 2)
         #return torch.gt(torch.abs(model.variance - MSE.detach()), 3*MSE)*torch.pow(model.variance - MSE.detach(), 2)*self.UNDERCERTAINTY_PENALTY_SCALE
-        return torch.pow(model.variance - MSE.detach(), 2)*self.UNDERCERTAINTY_PENALTY_SCALE
+        penalty = torch.pow(model.variance - MSE.detach(), 2)*self.UNDERCERTAINTY_PENALTY_SCALE
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"{self.name} extra gaus penalty max: {torch.max(penalty)}")
+        return penalty
         #return torch.max(self.ZERO, model.variance - MSE.detach()*self.UNDERCERTAINTY_PENALTY_SCALE)  # let's try keeping it simple first 
-        
+
     def estimate_distribution_from_samples(self, samples, weights):
         """
         in this case you do need to be careful--gaussian assumptions may not 
@@ -839,11 +914,21 @@ class GaussianVariable(TypicalRandomVariable):
         weighted_mean = torch.sum(samples*norm_weights, dim=-1, keepdim=True)
         weighted_variance = torch.sum(torch.pow(samples - weighted_mean, 2)*norm_weights, dim=-1)
         # bessel's correction: reference (https://stats.stackexchange.com/questions/47325/bias-correction-in-weighted-variance) rn
-        weighted_variance = weighted_variance/(self.ONE - torch.sum(torch.pow(norm_weights,2),dim=-1))
+        correction_factor = self.ONE - torch.sum(torch.pow(norm_weights,2),dim=-1)
+        if correction_factor > self.ZERO:  # don't correct if weights effectively reduced to a single sample
+            weighted_variance = weighted_variance/correction_factor
+        else:
+            warnings.warn("When estimating a distribution for {self.name}, only one sample has non-zero weight. Bessl's correction cannot be applied.")
         weighted_stddev = torch.sqrt(weighted_variance)
         # not thrilled about this line, but we need to prevent 0 variance. And we shoudln't wnat to differentiate thru this
         weighted_stddev = torch.max(weighted_stddev, self.EPS)
         weighted_mean = torch.squeeze(weighted_mean, -1)
+        """
+        logger.info(f"{self.name} est_dist_from_sample samples: {samples}")
+        logger.info(f"{self.name} est_dist_from_sample weights: {weights}")
+        logger.info(f"{self.name} est_dist_from_sample norm_weights: {norm_weights}")
+        logger.info(f"{self.name} est_dist_from_sample weighted_variance: {weighted_variance}")
+        """
         return torch.distributions.normal.Normal(weighted_mean, weighted_stddev, validate_args=True)
         
     def estimate_distribution_from_dists(self, dist_params, weights): 
@@ -866,7 +951,18 @@ class GaussianVariable(TypicalRandomVariable):
         
     def _differentiable_kl_divergence(self, p, q):
         return torch.distributions.kl.kl_divergence(p, q)  
-        
+
+    def loss_and_nlogp(self, dist_params, filled_in_dist_params, gt, sampled_value, total_downstream_nll, SGD_rather_than_EM=True):
+        if self.clip:
+            def hook(g):
+                #logger.info(f"gauss dist_param grad max: {g.max()}")
+                return g.clamp(min=-self.clip, max=self.clip)
+            for dp in dist_params+filled_in_dist_params:
+                if dp is not None:
+                    dp.register_hook(hook)
+        loss, nlogp = super().loss_and_nlogp(dist_params, filled_in_dist_params, gt, sampled_value, total_downstream_nll, SGD_rather_than_EM)
+        return loss, nlogp
+
     def _nlog_product(self, combined_gaussian, gaussians):
         """
         negative log of the total area under the curve that is the product of N gaussian distributions.
@@ -881,162 +977,15 @@ class GaussianVariable(TypicalRandomVariable):
                     -(torch.sum(torch.pow(gaussians.loc, 2)/ gaussians.variance, dim=0) - torch.pow(combined_gaussian.loc, 2)/combined_gaussian.variance)/2
         
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"combined_gaussian.loc: {combined_gaussian.loc}")
-            logger.debug(f"gaussian log_product: {log_product}")
+            logger.debug(f"combined_gaussian.loc shape: {combined_gaussian.loc.shape}")
+            logger.debug(f"gaussian log_product shape: {log_product.shape}")
         return -log_product
-        
-        
-class RegularizedGaussianPrior(GaussianVariable):
-    """
-    Represents a latent Gaussian variable which is regularized to some (typically unit gaussian) distribution, for use in 
-    creating a conditional variational autoencoder.
-
-    If you have a continuous-valued variable which genuinely has a complex non-point distribution given its parents,
-    consider performing some flavor of Variational AutoEncoding by stacking this latent GaussianVariable behind your 
-    variable of interest and connecting them to each other in a loop.
-    
-    This class essentially amounts to adding an additional 'prior' predictor with no parents--which the user must specify, as we 
-    don't know the shape of the variable in advance--and regularizing the final predicted distribution to be close to this 
-    prior. The prior itself is ignored in the actual forward pass if any of the 'normal' predictors are parented. We
-    intercept dist_params at the forward and loss_and_nlogp entry points.
-    Technically, we could have just thrown on the regularization and called it a day--the combination weights would quickly 
-    learn to ignore the prior--but since we already know that's going to happen, there's no reason not to make things 
-    easier for the model. Plus we don't want the prior to be temperature-scaled.
-    
-    We let 'ground truth' be passed in so that people can run the graph with different values for the prior.
-    """
-    
-    def __init__(self, name: str, predictor_fns: List[torch.nn.Module], per_prediction_parents: List[List[RandomVariable]], prior: torch.nn.Module, prior_parents=[]):
-        super(RegularizedGaussianPrior, self).__init__(name=name, predictor_fns=predictor_fns, per_prediction_parents=per_prediction_parents)
-        self.can_be_supervised = False
-        self.prior = prior
-        self.prior_parents = prior_parents
-        self.register_buffer('PRIOR_LOSS_SCALE', torch.tensor([0.1], dtype=torch.float32,requires_grad=False), persistent=False)
-        self.register_buffer('SHARPNESS_LOSS_SCALE', torch.tensor([0.00], dtype=torch.float32, requires_grad=False), persistent=False)            
-
-    def initialize(self):
-        # Prior tacked on after the fact so that NeuralGraphicalModel sees it but it does not affect combination weights
-        if not self._initialized:
-            super(RegularizedGaussianPrior, self).initialize()
-            self.per_prediction_parents.append(self.prior_parents)
-            self.predictor_fns.append(self.prior)
-           
-    def _log_extra_dist_params(self, dist_params, summary_writer: SummaryWriter, **kwargs):
-        super(RegularizedGaussianPrior, self)._log_extra_dist_params(dist_params[:-1], summary_writer, **kwargs)
-        if dist_params[-1] is not None:
-            mu, pre_sigma = torch.split(dist_params[-1], 1, dim=1)
-            summary_writer.add_histogram(self.name + f"/prior_mean", mu, **kwargs)
-            summary_writer.add_histogram(self.name + f"/prior_presigma", pre_sigma, **kwargs)
-
-    def _forward(self, dist_params, gt, SGD_rather_than_EM=True):
-        if gt is not None:
-            return gt
-        else:
-            predictor_dist_params = dist_params[:-1]
-            if any([dp is not None for dp in predictor_dist_params]):
-                model = self._dist_params_to_model(predictor_dist_params)
-            else:
-                prior_dist_params = dist_params[-1]
-                model = self._weighted_logits_to_model([torch.movedim(prior_dist_params,1,-1)])  # skips all weighting
-                
-            return model.rsample() if SGD_rather_than_EM else model.sample()
-        
-    def estimate_distribution_from_dists(self, dist_params, weights): 
-        return super(RegularizedGaussianPrior, self).estimate_distrbution_from_dists([dp[:-1] for dp in dist_params], weights)
-        
-    def loss_and_nlogp(self, dist_params, filled_in_dist_params, gt, sampled_value, total_downstream_nll, SGD_rather_than_EM=True):
-        # We end up copying and pasting loss_and_nlogp because I don't want to create extra returns/otherwise complicate the parent class for this. 
-        # Feels dirty but oh well. Maybe I'll add the necessary hook to TypicalRandomVariable later.
-        self.initialize()
-        prior_model = self._weighted_logits_to_model([torch.movedim(dist_params[-1],1,-1)])  # skips all weighting
-        dist_params = dist_params[:-1]
-        filled_in_dist_params = filled_in_dist_params[:-1]
-        loss = None
-        nlogp = None 
-        
-        if any([dp is not None for dp in dist_params]):
-            pred_logits = self._dist_params_to_pred_logits(dist_params)
-            weighted_logits = self._pred_logits_to_weighted_logits(pred_logits)
-            model = self._weighted_logits_to_model(weighted_logits)
-
-            if gt is not None:
-                # aka regular CE loss
-                nll = -model.log_prob(gt)                
-                loss = nll + self._extra_dist_loss(model, gt)
-            else:
-                if SGD_rather_than_EM:
-                    assert self.gradient_estimator == 'reparameterize'
-                    # in this (gauss) case regular gradient will be handled by Torch on backward pass
-                    loss = None
-                else:  # EM 
-                    nll = -model.log_prob(self._output_to_index(sampled_value))
-                    loss = nll + self._extra_dist_loss(model, sampled_value)
-         
-                logger.debug(f"{self.name} basic loss: {loss}")
-     
-            #logger.info(f"model.scale.shape: {model.scale.shape}")
-            #logger.info(f"prior_model.scale.shape: {prior_model.scale.shape}")
-            
-            # And this is the only extra bit we copied and pasted this whole function for! Very important regularization
-            # There is no detach() here. In theory, this pushes both closer to each other, if the prior is learnable.
-            reg_loss = self._differentiable_kl_divergence(model, prior_model)*self.PRIOR_LOSS_SCALE
-            sharp_loss = model.stddev*self.SHARPNESS_LOSS_SCALE
-            reg_loss = reg_loss + sharp_loss
-            loss = reg_loss if loss is None else loss + reg_loss
-     
-        # Then handle the nlogp--which happens if there is ground truth whose value we tried to predict, or multiple predictions
-        if (gt is not None and any([dp is not None for dp in dist_params])):
-            # nlog of distribution product needs to incorporate combo weights                
-            with torch.no_grad():
-                multiple_weighted_dists = self._weighted_logits_to_model([torch.stack([pl for pl in weighted_logits if pl is not None], dim=0)])
-                nlogp = -multiple_weighted_dists.log_prob(gt).sum(0)
-        elif gt is None and np.sum([dp is not None for dp in dist_params]) >= 2:
-            # we get nlogp based on whether/how much these predictions agree with each other 
-            # This section is very memory-intensive but doesn't have to be recorded
-            with torch.no_grad():
-                multiple_weighted_dists = self._weighted_logits_to_model([torch.stack([pl for pl in weighted_logits if pl is not None], dim=0)])
-                consensus_target = model  # self._weighted_logits_to_model([wl.detach() if wl is not None else None for wl in weighted_logits])    
-                nlogp = self._differentiable_kl_divergence(consensus_target, multiple_weighted_dists).sum(0)        
-        
-        # ==========================================================================
-        # THEN we handle the loss terms that come from having multiple predictors
-        # ========================================================================== 
-        # kl divergence here is just an 'arbitrary' penalty to make all predictors try to agree.
-        # But it is elegant because it is the same as the NLL of a point, if it is a point distribution. 
-        # So if there is no ground truth, we check KL divergence from the consensus anwer, otherwise the NLL of ground truth.
-        if ((gt is not None) + np.sum([dp is not None for dp in filled_in_dist_params]) >= 2):
-            # make a torch.dist of all the predicted distributions stacked up
-            # and make the kl divergence broadcast by putting 'prediction' in front dimension
-            filled_pred_logits = self._dist_params_to_pred_logits(filled_in_dist_params)
-            logger.debug(f"{self.name} prediction_tempscales: {self.prediction_tempscales}")
-            multiple_dists = self._weighted_logits_to_model([torch.stack([pl for pl in filled_pred_logits if pl is not None], dim=0)])
-            
-            if gt is None:
-                #re-compute final distribution but detached
-                consensus_target = self._weighted_logits_to_model([wl.detach() if wl is not None else None for wl in weighted_logits])    
-                agreement_loss = self._differentiable_kl_divergence(consensus_target, multiple_dists)        
-            else:
-                # this boils down to CE/NLL loss because gt is a point distribution 
-                agreement_loss = -multiple_dists.log_prob(gt) + self._extra_dist_loss(multiple_dists, gt)
-        
-            agreement_loss = agreement_loss.sum(0)
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"{self.name} agreement loss: {agreement_loss}")
-            
-            loss = agreement_loss if loss is None else loss + agreement_loss
-                
-        while loss is not None and loss.dim() > 1:
-            loss = torch.mean(loss, dim=-1)
-        while nlogp is not None and nlogp.dim() > 1:
-            nlogp = torch.mean(nlogp, dim=-1)
-        
-        return loss, nlogp
         
         
 class DeterministicContinuousVariable(RandomVariable):
     """
     Represents a variable that is NEVER supervised and not actually random--this is merely used to model network 
-    architectures that branch to predict multiple variables.
+    architectures that branch to use one feature in multiple ways.
     
     Since each RandomVariable gets their own nn.module 'predictor_fn', this provides an easy way to model a forking
     architecture that predicts multiple variables at once: model the final 'shared' feature as a DeterministicLatentVariable
@@ -1045,7 +994,7 @@ class DeterministicContinuousVariable(RandomVariable):
     simpler, you'll avoid redundant re-computation of the shared feature modeled by this 'variable'.
     
     You *probably* should not be supervising this, or trying to predict it. Given the theoretical underpinnings of 
-    Neural Graphical Models.
+    MSSNNs.
     But you know, the code will let you.
     """
     def __init__(self,  name: str, predictor_fns: List[torch.nn.Module], per_prediction_parents: List[List[RandomVariable]]):
@@ -1086,9 +1035,6 @@ class DeterministicContinuousVariable(RandomVariable):
     
     def _forward(self, dist_params, gt, SGD_rather_than_EM=True):
         if gt is None:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"{self.name}.isnan: {torch.isnan(dist_params).any()}")
-                logger.debug(f"{self.name}.isinf: {torch.isinf(dist_params).any()}")            
             assert len(dist_params)==1, "Multiple predictors not supported for DeterministicContinuousVariable at this time"
             return dist_params[0]
         else:
@@ -1149,6 +1095,7 @@ def gumbel_sigmoid(logits, hard=False):
 """
 Can be used to checkpoint high-memory ops like KL-divergence. Not currently used in this branch 
 b/c it does not play with DistributedDataParallel.
+TODO: Really, custom forward/backward implementations of certain operations may be needed to make this repo truly efficient.
 """
 def checkpoint(fn, *args):
     if USE_CHECKPOINTING:

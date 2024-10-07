@@ -3,21 +3,22 @@ Experiments running NGMs on the 16 most common scenes of the MIT ADE20K dataset.
 Main experiments of the paper.
 For directory structure of data see ade20k_common_scenes_dataset.py
 """
-from random_variable import CategoricalVariable, BooleanVariable, GaussianVariable, DeterministicContinuousVariable
-from graphical_model import NeuralGraphicalModel
+from ..random_variable import CategoricalVariable, BooleanVariable, GaussianVariable, DeterministicContinuousVariable
+from ..graphical_model import NeuralGraphicalModel
 import torch
 import numpy as np
 import torchvision
 from torch.utils.tensorboard import SummaryWriter
-from my_resnet import ResNet, BasicBlock, Bottleneck
+from ..my_resnet import ResNet, BasicBlock, Bottleneck
 from torch.nn.parameter import Parameter
 import torch.nn as nn
 import os, sys
 from pathlib import Path
 from torch.cuda.amp import autocast
 from torch.cuda.amp import GradScaler
-from ade20k_exp.ade20k_hierarchy import ADEWordnetHierarchy
-from ade20k_exp.ade20k_common_scenes_dataset import ADE20KCommonScenesDataset, IMCLASSES
+from .ade20k_hierarchy import ADEWordnetHierarchy
+from .ade20k_common_scenes_dataset import ADE20KCommonScenesDataset, IMCLASSES
+from math import ceil
 from torch.utils.data.sampler import Sampler
 import logging
 import random

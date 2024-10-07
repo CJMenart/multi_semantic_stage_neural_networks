@@ -3,4 +3,7 @@ events.out.tfevents.*
 *.csv
 *.pyc
 *.pth
+*.json
 **/*.pyc
+*.svg
+dtree*

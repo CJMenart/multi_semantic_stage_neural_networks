@@ -1,5 +1,5 @@
 """
-Bespoke/exotic/uncommon subclasses of RandomVariable, put in here to avoid cluttering random_variable.py
+A place of shame for RandomVariables that didn't work out.
 """
 import torch
 import numpy as np
@@ -7,7 +7,7 @@ import warnings
 from torch.utils.tensorboard import SummaryWriter
 from typing import List
 from torch.nn.parameter import Parameter
-from random_variable import *
+from .random_variable import *
 import logging
 logger = logging.getLogger(__name__)
 logger.propagate = False

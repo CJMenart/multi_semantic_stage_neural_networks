@@ -1,16 +1,16 @@
 import torch
-from ade20k_experiments import main, PartialSupervisionSampler, SynsetFromADEPredictor
-from ade20k_exp.ade20k_common_scenes_dataset import ADE20KCommonScenesDataset, IMCLASSES
-from utils import dict_to_gpu
+from .ade20k_experiments import main, PartialSupervisionSampler, SynsetFromADEPredictor
+from .ade20k_common_scenes_dataset import ADE20KCommonScenesDataset, IMCLASSES
+from ..utils import dict_to_gpu
 from sklearn import tree
 import sklearn.metrics
-from graphical_model import NeuralGraphicalModel
-from my_resnet import BasicBlock, ResNet
+from ..graphical_model import NeuralGraphicalModel
+from ..my_resnet import BasicBlock, ResNet
 import sys
 from pathlib import Path
 import logging
-from random_variable import *
-from ade20k_exp.ade20k_hierarchy import ADEWordnetHierarchy
+from ..random_variable import *
+from .ade20k_hierarchy import ADEWordnetHierarchy
 from torch.utils.data import Dataset
 from torch.cuda.amp import autocast
 from torch.cuda.amp import GradScaler

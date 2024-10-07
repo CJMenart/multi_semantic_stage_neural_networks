@@ -1,8 +1,10 @@
+"""
+This module supports DistributedDataParallel training with the NeuralGraphicalModel() class. You are expected to use far more than the forward() attribute of an MSSNN during training, so this wrapper (plus some behind-the-scenes nonsense) exposes those attributes and makdes a distributed, parallelized MSSNN which works as expected.
+"""
 from torch.nn.parallel import DistributedDataParallel
-#from .graphical_model import NeuralGraphicalModel
 from typing import List, Union, Optional
-from random_variable import RandomVariable
-from graphical_model import NeuralGraphicalModel
+from .random_variable import RandomVariable
+from .graphical_model import NeuralGraphicalModel
 
 
 class DDPNGM(DistributedDataParallel):

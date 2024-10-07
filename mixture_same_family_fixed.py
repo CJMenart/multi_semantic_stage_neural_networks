@@ -1,3 +1,6 @@
+"""
+Another replacement for bugged functionality in torch.distributions.
+"""
 import torch
 from torch.distributions.mixture_same_family import MixtureSameFamily
 

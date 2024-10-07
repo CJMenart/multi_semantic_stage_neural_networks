@@ -2,8 +2,8 @@
 (Essentially) unit tests for random_variable and graphical_model.
 """
 
-from graphical_model import NeuralGraphicalModel
-from random_variable import *
+from .graphical_model import NeuralGraphicalModel
+from .random_variable import *
 import torch
 import numpy as np
 
